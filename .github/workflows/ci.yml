@@ -1,0 +1,43 @@
+name: SQA CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: slikube
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install flake8 pytest
+
+      - name: Lint (syntax errors and undefined names)
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      - name: Run parsing tests
+        run: python TEST_PARSING.py
+
+      - name: Run full legacy test suite (informational)
+        # Many legacy tests reference absolute paths on the original author's
+        # machine (/Users/arahman/...), so they cannot pass in CI. We run them
+        # for visibility but do not fail the build on them.
+        continue-on-error: true
+        run: python -m pytest TEST_SCANNING.py TEST_GRAPH.py TEST_INTEGRATION.py -q
