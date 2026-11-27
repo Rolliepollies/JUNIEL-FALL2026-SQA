@@ -14,6 +14,13 @@ import pathlib as pl
 import re
 import subprocess
 import os
+from datetime import datetime, timezone
+from functools import wraps
+from inspect import isgeneratorfunction, signature
+from threading import Lock
+from time import perf_counter_ns
+from uuid import uuid4
+import warnings
 
 #update basepath
 base_path = r" "
@@ -21,6 +28,89 @@ base_path = r" "
 key_jsonpath_mapping = {}
 
     
+# Set SLIKUBE_AUDIT to a path to enable audit records
+_audit_run_id = uuid4().hex
+_audit_lock = Lock()
+
+
+def _write_parser_audit(destination, event, started):
+    event["timestamp_utc"] = datetime.now(timezone.utc).isoformat()
+    event["elapsed_ns"] = perf_counter_ns() - started
+    try:
+        with _audit_lock, open(destination, "a", encoding="utf-8") as log:
+            log.write(json.dumps(event) + "\n")
+    except OSError as error:
+        warnings.warn(f"SliKube audit write failed: {type(error).__name__}", RuntimeWarning)
+
+
+def _audit_parser(function=None, *, path_input=False):
+    if function is None:
+        return lambda target: _audit_parser(target, path_input=path_input)
+
+    parameters = signature(function)
+
+    def event_for(args, kwargs):
+        bound = parameters.bind_partial(*args, **kwargs)
+        value = next(iter(bound.arguments.values()), None)
+        event = {
+            "run_id": _audit_run_id,
+            "pid": os.getpid(),
+            "function": function.__name__,
+            "input_type": type(value).__name__,
+        }
+        if path_input and isinstance(value, (str, pl.PurePath)):
+            event["input_path"] = str(value)
+        return event
+
+    def record_error(event, error):
+        event.update(status="error", exception_type=type(error).__name__)
+
+    @wraps(function)
+    def call(*args, **kwargs):
+        destination = os.environ.get("SLIKUBE_AUDIT")
+        if not destination:
+            return function(*args, **kwargs)
+        event = event_for(args, kwargs)
+        started = perf_counter_ns()
+        try:
+            result = function(*args, **kwargs)
+            event.update(status="returned", result_type=type(result).__name__)
+            if isinstance(result, bool):
+                event["result"] = result
+            elif isinstance(result, (dict, list, str)):
+                event["result_size"] = len(result)
+            return result
+        except Exception as error:
+            record_error(event, error)
+            raise
+        finally:
+            _write_parser_audit(destination, event, started)
+
+    @wraps(function)
+    def iterate(*args, **kwargs):
+        destination = os.environ.get("SLIKUBE_AUDIT")
+        if not destination:
+            yield from function(*args, **kwargs)
+            return
+        event = event_for(args, kwargs)
+        started = perf_counter_ns()
+        event["status"] = "closed"
+        event["yield_count"] = 0
+        try:
+            for value in function(*args, **kwargs):
+                event["yield_count"] += 1
+                yield value
+            event["status"] = "exhausted"
+        except Exception as error:
+            record_error(event, error)
+            raise
+        finally:
+            _write_parser_audit(destination, event, started)
+
+    return iterate if isgeneratorfunction(function) else call
+
+
+@_audit_parser(path_input=True)
 def checkIfWeirdYAML(yaml_script):
     '''
     to filter invalid YAMLs such as ./github/workflows/ 
@@ -31,6 +121,7 @@ def checkIfWeirdYAML(yaml_script):
     return val 
 
 
+@_audit_parser
 def keyMiner(dic_, value):
   '''
   If you give a value, then this function gets the corresponding key, and the keys that call the key 
@@ -53,6 +144,7 @@ def keyMiner(dic_, value):
 
 
 
+@_audit_parser
 def getKeyRecursively(  dict_, list2hold,  depth_ = 0  ) :
     '''
     gives you ALL keys in a regular/nested dictionary 
@@ -74,6 +166,7 @@ def getKeyRecursively(  dict_, list2hold,  depth_ = 0  ) :
                 list2hold.append( (key_, depth_) ) 
     #print(list2hold)               
 
+@_audit_parser
 def getValuesRecursively(  dict_   ) :
     '''
     gives you ALL values in a regular/nested dictionary 
@@ -90,6 +183,7 @@ def getValuesRecursively(  dict_   ) :
         yield dict_ 
 
 
+@_audit_parser(path_input=True)
 def checkIfValidK8SYaml(path2yaml):
     val2ret   = False 
     dict_as_list = loadMultiYAML( path2yaml )
@@ -109,6 +203,7 @@ def checkIfValidK8SYaml(path2yaml):
 
 
 
+@_audit_parser
 def getValsFromKey(dict_, target, list_holder  ):
     '''
     If you give a key, then this function gets the corresponding values 
@@ -132,6 +227,7 @@ def checkIfValidHelm(path_script):
         val_ret = True 
     return val_ret
 
+@_audit_parser(path_input=True)
 def readYAMLAsStr( path_script ):
     yaml_as_str = constants.YAML_SKIPPING_TEXT
     with open( path_script , constants.FILE_READ_FLAG) as file_:
@@ -139,6 +235,7 @@ def readYAMLAsStr( path_script ):
     return yaml_as_str
 
 # This function checks whether our parser throws an exception for reading the YAML file. 
+@_audit_parser(path_input=True)
 def checkParseError( path_script ):
     flag = True
     with open(path_script, constants.FILE_READ_FLAG) as yml:
@@ -157,6 +254,7 @@ def checkParseError( path_script ):
             print( constants.YAML_SKIPPING_TEXT  )
     return flag
 
+@_audit_parser(path_input=True)
 def loadMultiYAML( script_ ):
     dicts2ret = []  
     with open(script_, constants.FILE_READ_FLAG  ) as yml_content :
@@ -362,6 +460,7 @@ def show_line_for_paths(  filepath, key): #key_jsonpath_mapping is a global dict
 
 
 
+@_audit_parser
 def getSingleDict4MultiDocs( lis_dic ):
     dict2ret = {} 
     key_lis  = []
