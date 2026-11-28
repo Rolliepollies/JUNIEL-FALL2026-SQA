@@ -41,3 +41,19 @@ jobs:
         # for visibility but do not fail the build on them.
         continue-on-error: true
         run: python -m pytest TEST_SCANNING.py TEST_GRAPH.py TEST_INTEGRATION.py -q
+
+      - name: Run fuzzer with forensics logging
+        working-directory: .
+        env:
+          SLIKUBE_AUDIT: ${{ github.workspace }}/slikube-audit.jsonl
+        run: python fuzz.py
+
+      - name: Upload fuzz report and forensics log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-and-forensics
+          path: |
+            fuzz_report.json
+            slikube-audit.jsonl
+          if-no-files-found: warn
